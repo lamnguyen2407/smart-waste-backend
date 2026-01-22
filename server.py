@@ -71,7 +71,7 @@ def get_bins_api():
         
         if s_id == "BIN1":
             # Data gốc: fill 85, battery 45
-            current_fill = 85
+            current_fill = 82
             battery = 45
             
         elif s_id == "BIN2":
