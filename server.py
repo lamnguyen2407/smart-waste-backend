@@ -2,42 +2,76 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 import pandas as pd
 import joblib
-import datetime
 import os
-import random
-# Import sklearn để tránh lỗi nếu máy chưa load thư viện
+import time
+import random 
+# Import sklearn để tránh lỗi
 from sklearn.linear_model import LinearRegression 
 import firebase_admin
-from firebase_admin import credentials, db
+from firebase_admin import credentials, firestore
 
-# --- 1. CẤU HÌNH KẾT NỐI FIREBASE ---
+# --- 1. CẤU HÌNH KẾT NỐI FIRESTORE ---
 if not firebase_admin._apps:
-    # Đảm bảo file firebase-key.json đang nằm cùng thư mục
     cred = credentials.Certificate("firebase-key.json")
-    firebase_admin.initialize_app(cred, {
-        # THAY LINK CỦA BẠN VÀO ĐÂY NHÉ !!!
-        'databaseURL': 'https://introcecs-default-rtdb.asia-southeast1.firebasedatabase.app/' 
-    })
+    firebase_admin.initialize_app(cred)
 
-# Hàm lấy dữ liệu Bin 5
-def get_bin5_data_from_firebase():
-    try:
-        # Sửa đường dẫn này cho khớp với cây thư mục trên Firebase của bạn
-        ref = db.reference('Bin5') # Ví dụ: Nếu data nằm ngay folder gốc tên Bin5
-        data = ref.get()
-        if data:
-            print(f"🔥 Data Bin 5 từ Firebase: {data}")
-            return data
-        else:
-            return None
-    except Exception as e:
-        print("❌ Lỗi đọc Firebase:", e)
-        return None
+# Khởi tạo Client
+db = firestore.client()
+
+# --- BIẾN TOÀN CỤC ĐỂ LƯU CACHE ---
+cached_bin5_data = None   # Lưu dữ liệu thô từ Firestore
+last_read_time = 0        # Lưu thời điểm đọc gần nhất
+
+# ============================================================
+# 🛡️ HÀM LẤY DỮ LIỆU AN TOÀN TUYỆT ĐỐI (FIX LỖI 27K READS) 🛡️
+# ============================================================
+def get_bin5_data_safe():
+    global cached_bin5_data, last_read_time
     
+    current_time = time.time()
+    
+    # 🛑 1. KIỂM TRA THỜI GIAN:
+    # Nếu chưa quá 10 giây kể từ lần gọi trước
+    if (current_time - last_read_time < 10):
+        if cached_bin5_data is not None:
+            print("⏳ Đang dùng Cached Data (Tiết kiệm quota)...")
+            return cached_bin5_data
+        else:
+            # TRƯỜNG HỢP QUAN TRỌNG:
+            # Nếu chưa có cache (lần đầu chạy) mà Web gọi liên tục
+            # -> Trả về None ngay để chặn việc đọc Firestore dồn dập
+            print("🚫 Đang chờ dữ liệu đầu tiên (Chặn Spam)...")
+            return None
+
+    # 🔒 2. KHÓA CỬA NGAY LẬP TỨC (QUAN TRỌNG NHẤT)
+    # Cập nhật thời gian TRƯỚC khi đọc. Để các request đến sau bị chặn ngay.
+    last_read_time = current_time 
+
+    # ✅ 3. TIẾN HÀNH ĐỌC TỪ GOOGLE
+    try:
+        print("🔄 Đang đọc dữ liệu mới từ Firestore...")
+        users_ref = db.collection('devices')
+        docs = users_ref.stream()
+
+        for doc in docs:
+            data = doc.to_dict()
+            print(f"🔥 Tìm thấy Device ID: {doc.id}")
+            
+            # Cập nhật Cache
+            cached_bin5_data = data
+            return data
+            
+        return None 
+    except Exception as e:
+        print("❌ Lỗi đọc Firestore:", e)
+        # Nếu lỗi thì reset thời gian về 0 để lần sau thử lại ngay
+        last_read_time = 0 
+        return None 
+
 app = Flask(__name__)
 CORS(app)
 
-# --- CẤU HÌNH ĐƯỜNG DẪN ---
+# --- CẤU HÌNH ĐƯỜNG DẪN MODEL ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "app", "models")
 
@@ -49,6 +83,7 @@ def predict_trash_tomorrow(bin_id, current_fill_level):
             return 10.0 
 
         model = joblib.load(model_path)
+        
         X_input = pd.DataFrame([{
             "trash_generated_today": current_fill_level,
             "trash_generated_yesterday": 15, 
@@ -56,12 +91,13 @@ def predict_trash_tomorrow(bin_id, current_fill_level):
             "is_weekend_tomorrow": 0,
             "is_holiday_tomorrow": 0
         }])
+        
         features = ["trash_generated_today", "trash_generated_yesterday", "trash_generated_2_days_ago", "is_weekend_tomorrow", "is_holiday_tomorrow"]
         X_input = X_input[features]
+        
         prediction = model.predict(X_input)[0]
         return max(0.0, float(prediction))
     except Exception as e:
-        print(f"⚠️ Lỗi model {bin_id}: {e}")
         return 5.0
 
 @app.route('/api/get-bins', methods=['GET'])
@@ -78,41 +114,42 @@ def get_bins_api():
 
     for bin_info in bins_config:
         s_id = bin_info['short_id']
-        
-        # Mặc định các bin khác giữ nguyên
         current_fill = 50 
         battery = 90
 
-        if s_id == "BIN1":
-            current_fill = 82; battery = 45
-        elif s_id == "BIN2":
-            current_fill = 45; battery = 90
-        elif s_id == "BIN3":
-            current_fill = 48; battery = 65
-        elif s_id == "BIN4":
-            current_fill = 88; battery = 95
+        # Data giả lập cho Bin 1-4
+        if s_id == "BIN1": current_fill = 82
+        elif s_id == "BIN2": current_fill = 45
+        elif s_id == "BIN3": current_fill = 48
+        elif s_id == "BIN4": current_fill = 88
         
+        # --- XỬ LÝ BIN 5 (DỮ LIỆU THẬT + RANDOM DỰ PHÒNG) ---
         elif s_id == "BIN5":
-            # --- ĐÂY LÀ CHỖ QUAN TRỌNG ĐÃ SỬA ---
-            fb_data = get_bin5_data_from_firebase() # Gọi hàm lấy data thật
+            fb_data = get_bin5_data_safe()
             
+            # 1. Random trước (đề phòng lỗi mạng hoặc chưa lấy được data)
+            current_fill = random.randint(60, 95) 
+
+            # 2. Nếu có data thật thì ghi đè lên
             if fb_data:
-                # TH1: Nếu Firebase trả về số nguyên (ví dụ: 85)
-                try:
-                    current_fill = int(fb_data)
-                except:
-                    # TH2: Nếu Firebase trả về Dictionary (ví dụ: {'fill': 85})
-                    # Bạn phải sửa key 'fill' thành tên key thật trên Firebase của bạn
-                    if isinstance(fb_data, dict):
-                         current_fill = int(fb_data.get('fill', 75))
-            else:
-                # Nếu mất mạng hoặc lỗi key thì Random chống cháy
-                current_fill = random.randint(60, 98)
+                # Ưu tiên đọc trường 'fullness_RM' (Database Mới)
+                if 'fullness' in fb_data:
+                    try:
+                        current_fill = int(fb_data['fullness'])
+                    except:
+                        pass
+                # Nếu không có thì thử đọc 'fullness' (Database Cũ - đề phòng)
+                elif 'fullness_RM' in fb_data:
+                    try:
+                        current_fill = int(fb_data['fullness_RM'])
+                    except:
+                        pass
+            
+            # Nếu fb_data là None (do bị chặn spam hoặc lỗi) -> Nó sẽ giữ giá trị Random ở trên
 
         # --- DỰ BÁO ---
         added_val = predict_trash_tomorrow(s_id, current_fill)
         predicted_total = current_fill + added_val
-        
         is_fill = (current_fill >= 85 or predicted_total >= 85)
         status = "Fill" if is_fill else "Not Fill"
 
