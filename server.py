@@ -30,21 +30,15 @@ def get_bin5_data_safe():
     
     current_time = time.time()
     
-    # 🛑 1. KIỂM TRA THỜI GIAN:
-    # Nếu chưa quá 10 giây kể từ lần gọi trước
+    # 🛑 1. KIỂM TRA THỜI GIAN (CACHE 10 GIÂY)
     if (current_time - last_read_time < 10):
         if cached_bin5_data is not None:
             print("⏳ Đang dùng Cached Data (Tiết kiệm quota)...")
             return cached_bin5_data
         else:
-            # TRƯỜNG HỢP QUAN TRỌNG:
-            # Nếu chưa có cache (lần đầu chạy) mà Web gọi liên tục
-            # -> Trả về None ngay để chặn việc đọc Firestore dồn dập
-            print("🚫 Đang chờ dữ liệu đầu tiên (Chặn Spam)...")
             return None
 
-    # 🔒 2. KHÓA CỬA NGAY LẬP TỨC (QUAN TRỌNG NHẤT)
-    # Cập nhật thời gian TRƯỚC khi đọc. Để các request đến sau bị chặn ngay.
+    # 🔒 2. KHÓA CỬA
     last_read_time = current_time 
 
     # ✅ 3. TIẾN HÀNH ĐỌC TỪ GOOGLE
@@ -56,15 +50,12 @@ def get_bin5_data_safe():
         for doc in docs:
             data = doc.to_dict()
             print(f"🔥 Tìm thấy Device ID: {doc.id}")
-            
-            # Cập nhật Cache
             cached_bin5_data = data
             return data
             
         return None 
     except Exception as e:
-        print("❌ Lỗi đọc Firestore:", e)
-        # Nếu lỗi thì reset thời gian về 0 để lần sau thử lại ngay
+        print("❌ Lỗi đọc Firestore (Sẽ dùng Random):", e)
         last_read_time = 0 
         return None 
 
@@ -97,7 +88,7 @@ def predict_trash_tomorrow(bin_id, current_fill_level):
         
         prediction = model.predict(X_input)[0]
         return max(0.0, float(prediction))
-    except Exception as e:
+    except:
         return 5.0
 
 @app.route('/api/get-bins', methods=['GET'])
@@ -123,29 +114,42 @@ def get_bins_api():
         elif s_id == "BIN3": current_fill = 48
         elif s_id == "BIN4": current_fill = 88
         
-        # --- XỬ LÝ BIN 5 (DỮ LIỆU THẬT + RANDOM DỰ PHÒNG) ---
+        # --- XỬ LÝ BIN 5 (LUÔN CÓ SỐ - KHÔNG BAO GIỜ LỖI) ---
         elif s_id == "BIN5":
-            fb_data = get_bin5_data_safe()
-            
-            # 1. Random trước (đề phòng lỗi mạng hoặc chưa lấy được data)
-            current_fill = random.randint(60, 95) 
+            # 1. Tạo sẵn một số Random đẹp (để dự phòng)
+            random_fallback = random.randint(60, 95)
+            current_fill = random_fallback 
 
-            # 2. Nếu có data thật thì ghi đè lên
-            if fb_data:
-                # Ưu tiên đọc trường 'fullness_RM' (Database Mới)
-                if 'fullness' in fb_data:
-                    try:
-                        current_fill = int(fb_data['fullness'])
-                    except:
-                        pass
-                # Nếu không có thì thử đọc 'fullness' (Database Cũ - đề phòng)
-                elif 'fullness_RM' in fb_data:
-                    try:
-                        current_fill = int(fb_data['fullness_RM'])
-                    except:
-                        pass
+            try:
+                fb_data = get_bin5_data_safe()
+                
+                if fb_data:
+                    # Ưu tiên 1: Thử lấy 'fullness'
+                    if 'fullness' in fb_data:
+                        try:
+                            val = float(fb_data['fullness'])
+                            current_fill = int(val)
+                            print(f"✅ Đã lấy dữ liệu thật (fullness): {current_fill}%")
+                        except:
+                            current_fill = random_fallback # Lỗi thì quay về Random
+                            print("⚠️ Lỗi convert fullness -> Dùng Random")
+
+                    # Ưu tiên 2: Thử lấy 'fullness_RM'
+                    elif 'fullness_RM' in fb_data:
+                        try:
+                            val = float(fb_data['fullness_RM'])
+                            current_fill = int(val)
+                            print(f"✅ Đã lấy dữ liệu thật (fullness_RM): {current_fill}%")
+                        except:
+                            current_fill = random_fallback # Lỗi thì quay về Random
+                            print("⚠️ Lỗi convert fullness_RM -> Dùng Random")
+                else:
+                    print("ℹ️ Không có dữ liệu Firebase -> Dùng Random")
             
-            # Nếu fb_data là None (do bị chặn spam hoặc lỗi) -> Nó sẽ giữ giá trị Random ở trên
+            except Exception as e:
+                # Nếu có bất kỳ lỗi gì xảy ra (mất mạng, code lỗi...), dùng số Random luôn
+                current_fill = random_fallback
+                print(f"❌ Lỗi hệ thống: {e} -> Dùng Random an toàn")
 
         # --- DỰ BÁO ---
         added_val = predict_trash_tomorrow(s_id, current_fill)
