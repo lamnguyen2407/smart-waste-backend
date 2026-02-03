@@ -12,11 +12,19 @@ from firebase_admin import credentials, firestore
 
 # --- 1. CẤU HÌNH KẾT NỐI FIRESTORE ---
 if not firebase_admin._apps:
-    cred = credentials.Certificate("firebase-key.json")
-    firebase_admin.initialize_app(cred)
+    # Kiểm tra file json có tồn tại không để tránh crash trên Render nếu chưa upload
+    if os.path.exists("firebase-key.json"):
+        cred = credentials.Certificate("firebase-key.json")
+        firebase_admin.initialize_app(cred)
+    else:
+        print("⚠️ Warning: firebase-key.json not found. Firebase features will fail.")
 
 # Khởi tạo Client
-db = firestore.client()
+try:
+    db = firestore.client()
+except:
+    db = None
+    print("⚠️ Warning: Could not connect to Firestore.")
 
 # --- BIẾN TOÀN CỤC ĐỂ LƯU CACHE ---
 cached_bin5_data = None   # Lưu dữ liệu thô từ Firestore
@@ -28,6 +36,8 @@ last_read_time = 0        # Lưu thời điểm đọc gần nhất
 def get_bin5_data_safe():
     global cached_bin5_data, last_read_time
     
+    if db is None: return None
+
     current_time = time.time()
     
     # 🛑 1. KIỂM TRA THỜI GIAN (CACHE 10 GIÂY)
@@ -171,6 +181,13 @@ def get_bins_api():
         })
 
     return jsonify(bins_response)
+
+# =====================================================
+# 🛠️ QUAN TRỌNG: API PING CHO UPTIMEROBOT (MỚI THÊM)
+# =====================================================
+@app.route('/ping', methods=['GET'])
+def ping_pong():
+    return "Pong", 200
 
 if __name__ == '__main__':
     # Render sẽ tự động cấp cổng qua biến môi trường PORT
