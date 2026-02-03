@@ -173,4 +173,9 @@ def get_bins_api():
     return jsonify(bins_response)
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    # Render sẽ tự động cấp cổng qua biến môi trường PORT
+    # Mặc định là 10000 nếu chạy local
+    port = int(os.environ.get("PORT", 10000))
+    # Host phải là 0.0.0.0 thì bên ngoài mới truy cập được
+    print(f"🚀 Server starting on port {port}...")
+    app.run(host='0.0.0.0', port=port)
